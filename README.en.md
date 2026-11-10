@@ -1,10 +1,17 @@
-# INPHIC / ATK Battery Tray
+# INPHIC / ATK / XIBERIA Battery Tray
 
 [中文](README.md) | [**English**](README.en.md)
 
-A **taskbar battery indicator** for wireless mice. Supports INPHIC **IN10** (device pushes reports), **IN9** (host queries a Feature Report), and **ATK X1 Pro with its 1K receiver** (Output/Input Report queries).
+A **taskbar battery indicator** for wireless mice. Supports INPHIC **IN10** (device pushes reports), **IN9** (host queries a Feature Report), **ATK X1 Pro with its 1K receiver**, and **XIBERIA X7 Pro Max with its 8K receiver** (Output/Input Report queries).
 
-No driver patching, DLL injection, or device configuration changes. IN10 listens for battery updates; IN9 and ATK send battery queries, then display valid readings in the notification area.
+No driver patching, DLL injection, or device configuration changes. IN10 listens for battery updates; the other protocols query battery or device status, then display valid readings in the notification area.
+
+### XIBERIA X7 Pro Max with its 8K receiver
+
+- Repeated real hardware reads returned 92% from **X7 Receiver 8K `36F9:AA20`**, through its 65-byte vendor collection, `Usage Page 0xFF0A / Usage 0x0001`.
+- Follows the DS Mouse HID protocol from the [official web driver](https://hub.crociris.com/), sending only the read-only `0x12` status query. Validates the response header, command, result, payload length, battery range and wireless connection; disconnected receiver cache data is rejected.
+- Reuses polling, rescanning, tray and details behavior. Reads no mouse movement or keyboard input and applies no ATK calibration data.
+- Charging and independent full-charge flags are parsed from the documented format and covered by synthetic packet checks. Only the non-charging state was checked on hardware. Wired data mode, other X7 receivers, charging dock behavior, full-charge status and receiver unplug/replug recovery were not checked on hardware.
 
 ### ATK X1 Pro support in this branch
 

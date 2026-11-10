@@ -13,9 +13,9 @@ try {
     & $csc /nologo /target:exe /platform:x64 /main:InphicBatteryTray.AtkChecks "/out:$output" `
         /reference:System.dll /reference:System.Core.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
         (Join-Path $root 'src\InphicBatteryTray.cs') (Join-Path $PSScriptRoot 'AtkChecks.cs')
-    if ($LASTEXITCODE -ne 0) { throw 'ATK checks did not compile.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Battery checks did not compile.' }
     if ($Probe) { & $output --probe } else { & $output }
-    if ($LASTEXITCODE -ne 0) { throw 'ATK checks failed.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Battery checks failed.' }
 }
 finally {
     if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output }

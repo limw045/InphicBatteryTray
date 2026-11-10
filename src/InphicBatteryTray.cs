@@ -1,4 +1,4 @@
-// InphicBatteryTray.cs  —  INPHIC / ATK 鼠标电量托盘显示器
+// InphicBatteryTray.cs  —  INPHIC / ATK / XIBERIA 鼠标电量托盘显示器
 // 接收或查询电量，不修改设备配置、固件或原厂软件。
 //
 // 图标：由 鼠标.svg 渲染的剪影，按电量从下往上填充，颜色随电量变化。
@@ -141,6 +141,7 @@ namespace InphicBatteryTray
         public string Transport;   // USB / 蓝牙
         public bool IsIn9;         // IN9 系列：需要主动查询
         public bool IsAtk;
+        public bool IsX7;
         public ushort UsagePage;
         public ushort Usage;
         public int InLen;          // 输入报告长度
@@ -155,7 +156,7 @@ namespace InphicBatteryTray
         public double LastIntervalMs;
         public DateTime LastSeen = DateTime.MinValue;
         public int ChargeState = -1;   // 1 正常 / 2 已满 / 3 充电
-        public string Protocol;        // "IN10 push" / "IN9 query" / "ATK query"
+        public string Protocol;        // "IN10 push" / "IN9 query" / "ATK query" / "X7 status query"
         public string Product;
         public ushort Vid;
         public ushort Pid;
@@ -627,7 +628,7 @@ namespace InphicBatteryTray
                 {
                     try
                     {
-                        if (dev.IsAtk) AtkQueryLoop(dev, generation);
+                        if (dev.IsAtk || dev.IsX7) MouseQueryLoop(dev, generation);
                         else if (dev.IsIn9) In9QueryLoop(dev, generation);
                         else ReadLoop(dev, generation);
                     }
@@ -720,6 +721,7 @@ namespace InphicBatteryTray
                     foreach (HidInterface d in all)
                     {
                         if (IsAtk(d)) { d.IsAtk = true; targets.Add(d); continue; }
+                        if (IsX7(d)) { d.IsX7 = true; targets.Add(d); continue; }
                         if (IsIn10(d)) { targets.Add(d); continue; }
 
                         if (IsIn9Vid(d.Vid))
@@ -828,16 +830,72 @@ namespace InphicBatteryTray
             return -1;
         }
 
-        static void AtkQueryLoop(HidInterface dev, int generation)
+        // X7 / DS Mouse HID：Report ID 0，AA 12 查询状态，55 12 返回状态。
+        internal static bool IsX7(HidInterface dev)
         {
-            Log("ATK try open: " + dev.Path);
+            return dev.Vid == 0x36F9 && dev.Pid == 0xAA20 &&
+                dev.UsagePage == 0xFF0A && dev.Usage == 0x0001 &&
+                dev.InLen == 65 && dev.OutLen == 65;
+        }
+
+        internal static int ParseX7Battery(byte[] response, int count)
+        {
+            if (response == null || count != 65 || response.Length < count ||
+                response[0] != 0 || response[1] != 0x55 || response[2] != 0x12 ||
+                response[3] < 5 || response[3] > count - 5 || response[4] != 0 ||
+                response[6] > 100 || (response[8] & 0x0F) != 1 || response[9] != 1)
+                return -1;
+            return response[6];
+        }
+
+        internal static int ParseX7Charge(byte[] response, int count)
+        {
+            if (ParseX7Battery(response, count) < 0 || response[5] > 1 || response[7] > 1) return -1;
+            if (response[7] == 1) return 2;
+            return response[5] == 1 ? 3 : 1;
+        }
+
+        internal static int QueryX7Battery(IntPtr handle, HidInterface dev, out int charge)
+        {
+            charge = -1;
+            if (!IsX7(dev)) return -1;
+            byte[] request = new byte[65];
+            request[1] = 0xAA;
+            request[2] = 0x12;
+            if (HidTransfer(handle, request, 1000, true) != request.Length)
+            {
+                Log("X7 query write failed or timed out");
+                return -1;
+            }
+            byte[] response = new byte[65];
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            while (elapsed.ElapsedMilliseconds < 1500)
+            {
+                int count = HidTransfer(handle, response, (int)Math.Max(0, 1500 - elapsed.ElapsedMilliseconds), false);
+                if (count <= 0) break;
+                Log("X7 rx: " + Hex(response, count));
+                int level = ParseX7Battery(response, count);
+                if (level >= 0)
+                {
+                    charge = ParseX7Charge(response, count);
+                    return level;
+                }
+            }
+            Log("X7 no valid connected status reply");
+            return -1;
+        }
+
+        static void MouseQueryLoop(HidInterface dev, int generation)
+        {
+            string brand = dev.IsX7 ? "X7" : "ATK";
+            Log(brand + " try open: " + dev.Path);
             IntPtr handle = Native.CreateFileW(dev.Path,
                 Native.GENERIC_READ | Native.GENERIC_WRITE,
                 Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE,
                 IntPtr.Zero, Native.OPEN_EXISTING, Native.FILE_FLAG_OVERLAPPED, IntPtr.Zero);
             if (handle == Native.INVALID_HANDLE_VALUE)
             {
-                Log("ATK open FAILED err=" + Marshal.GetLastWin32Error());
+                Log(brand + " open FAILED err=" + Marshal.GetLastWin32Error());
                 return;
             }
             try
@@ -846,7 +904,8 @@ namespace InphicBatteryTray
                 while (running && generation == Thread.VolatileRead(ref readerGeneration))
                 {
                     int charge;
-                    int level = QueryAtkBattery(handle, dev, out charge);
+                    int level = dev.IsX7 ? QueryX7Battery(handle, dev, out charge)
+                        : QueryAtkBattery(handle, dev, out charge);
                     if (!running || generation != Thread.VolatileRead(ref readerGeneration)) break;
                     if (level < 0)
                     {
@@ -861,9 +920,9 @@ namespace InphicBatteryTray
                             if (!states.TryGetValue(dev.Path, out state))
                             {
                                 state = new DeviceState();
-                                state.Label = "ATK X1 Pro (1K)";
-                                state.Product = "ATK X1 Pro / " + dev.Product;
-                                state.Protocol = "ATK query";
+                                state.Label = dev.IsX7 ? "XIBERIA X7 Pro Max (8K)" : "ATK X1 Pro (1K)";
+                                state.Product = (dev.IsX7 ? "XIBERIA X7 Pro Max / " : "ATK X1 Pro / ") + dev.Product;
+                                state.Protocol = dev.IsX7 ? "X7 status query" : "ATK query";
                                 state.Vid = dev.Vid;
                                 state.Pid = dev.Pid;
                                 state.Transport = "2.4G (USB 接收器)";
@@ -876,12 +935,12 @@ namespace InphicBatteryTray
                             state.ChargeState = charge;
                             state.LastSeen = now;
                         }
-                        Log("ATK battery " + level + "% charge=" + charge);
+                        Log(brand + " battery " + level + "% charge=" + charge);
                     }
                     Thread.Sleep(2500);
                 }
             }
-            catch (Exception ex) { Log("ATK loop exception: " + ex.Message); }
+            catch (Exception ex) { Log(brand + " loop exception: " + ex.Message); }
             finally { Native.CloseHandle(handle); }
         }
 

@@ -69,6 +69,7 @@ namespace InphicBatteryTray
                 Check(Program.QueryAtkBattery(Native.INVALID_HANDLE_VALUE, Receiver(), out charge) == -1 && charge == -1,
                     "A failed write must not produce a reading");
                 CheckAtkCharging();
+                CheckX7();
                 CheckCalibrationCapture();
                 CheckChargingTooltip();
                 CheckInphic();
@@ -78,7 +79,7 @@ namespace InphicBatteryTray
                 CheckLogLimit();
                 CheckSingleInstance();
                 CheckDeviceIdentity();
-                Console.WriteLine("PASS: " + checks + " ATK checks");
+                Console.WriteLine("PASS: " + checks + " battery checks");
 
                 if (args.Length > 0 && args[0] == "--probe") Probe();
                 return 0;
@@ -119,6 +120,76 @@ namespace InphicBatteryTray
             SetLevel(charging, 100);
             Check(Program.ParseAtkCharge(charging, 17) == 3,
                 "A 100 percent reading alone must not invent an unverified charge-complete flag");
+        }
+
+        static HidInterface X7Receiver()
+        {
+            return new HidInterface { Vid = 0x36F9, Pid = 0xAA20,
+                UsagePage = 0xFF0A, Usage = 1, InLen = 65, OutLen = 65 };
+        }
+
+        static void CheckX7()
+        {
+            var dev = X7Receiver();
+            Check(Program.IsX7(dev), "Match the verified X7 8K status collection");
+            dev.Vid = 0x373B;
+            Check(!Program.IsX7(dev), "Do not send X7 commands to another vendor");
+            dev = X7Receiver(); dev.Pid = 0xAA23;
+            Check(!Program.IsX7(dev), "Do not probe unverified X7 wired mode");
+            dev = X7Receiver(); dev.UsagePage = 1;
+            Check(!Program.IsX7(dev), "Never read X7 mouse or keyboard input");
+            dev = X7Receiver(); dev.Usage = 2;
+            Check(!Program.IsX7(dev), "Reject another X7 vendor collection");
+            dev = X7Receiver(); dev.InLen = 64;
+            Check(!Program.IsX7(dev), "Reject incorrect X7 input size");
+            dev = X7Receiver(); dev.OutLen = 64;
+            Check(!Program.IsX7(dev), "Reject incorrect X7 output size");
+
+            byte[] reply = new byte[65];
+            byte[] captured = Array.ConvertAll(
+                "00 55 12 1A 00 00 5C 00 01 01 00 00 30 03 04 80 0C 80 0C 00 FF 02 05 05 04 04 00 01 FF 00 FF".Split(' '),
+                delegate(string value) { return Convert.ToByte(value, 16); });
+            Array.Copy(captured, reply, captured.Length);
+            Check(Program.ParseX7Battery(reply, 65) == 92 && Program.ParseX7Charge(reply, 65) == 1,
+                "Decode the real X7 92 percent, not-charging capture");
+            reply[6] = 0;
+            Check(Program.ParseX7Battery(reply, 65) == 0, "X7 zero percent is valid");
+            reply[6] = 100;
+            Check(Program.ParseX7Battery(reply, 65) == 100 && Program.ParseX7Charge(reply, 65) == 1,
+                "X7 100 percent alone must not imply full-charge status");
+            reply[5] = 1;
+            Check(Program.ParseX7Charge(reply, 65) == 3, "Decode documented X7 charging flag");
+            reply[7] = 1;
+            Check(Program.ParseX7Charge(reply, 65) == 2, "Decode documented X7 independent full-charge flag");
+            reply[5] = 2;
+            Check(Program.ParseX7Charge(reply, 65) == -1, "Keep unknown X7 charging flags unknown");
+            reply[5] = 0; reply[7] = 0; reply[6] = 101;
+            Check(Program.ParseX7Battery(reply, 65) == -1, "Reject invalid X7 percentage");
+            reply[6] = 92;
+            Check(Program.ParseX7Battery(null, 65) == -1 && Program.ParseX7Battery(new byte[10], 65) == -1,
+                "Validate X7 buffer presence and capacity");
+            for (int n = 0; n < 65; n++)
+                Check(Program.ParseX7Battery(reply, n) == -1, "Reject partial X7 input length " + n);
+            reply[0] = 8;
+            Check(Program.ParseX7Battery(reply, 65) == -1, "Reject incorrect X7 report ID");
+            reply[0] = 0; reply[1] = 0xAA;
+            Check(Program.ParseX7Battery(reply, 65) == -1, "Do not treat an echoed X7 request as a reply");
+            reply[1] = 0x55; reply[2] = 0x13;
+            Check(Program.ParseX7Battery(reply, 65) == -1, "Reject another X7 command");
+            reply[2] = 0x12; reply[3] = 4;
+            Check(Program.ParseX7Battery(reply, 65) == -1, "Reject a short declared X7 payload");
+            reply[3] = 61;
+            Check(Program.ParseX7Battery(reply, 65) == -1, "Reject an oversized declared X7 payload");
+            reply[3] = 26; reply[4] = 1;
+            Check(Program.ParseX7Battery(reply, 65) == -1 && Program.ParseX7Charge(reply, 65) == -1,
+                "Rejected commands cannot update X7 battery or charging state");
+            reply[4] = 0; reply[9] = 0;
+            Check(Program.ParseX7Battery(reply, 65) == -1, "An unplugged X7 mouse must not refresh cached receiver data");
+            reply[9] = 1; reply[8] = 0;
+            Check(Program.ParseX7Battery(reply, 65) == -1, "Require the verified receiver connection mode");
+            int charge;
+            Check(Program.QueryX7Battery(Native.INVALID_HANDLE_VALUE, X7Receiver(), out charge) == -1 && charge == -1,
+                "A failed X7 write must not produce a reading");
         }
 
         static void CheckCalibrationCapture()
@@ -349,9 +420,10 @@ namespace InphicBatteryTray
             int found = 0;
             foreach (HidInterface dev in Reader.Enumerate())
             {
-                if (!Program.IsAtk(dev)) continue;
+                bool x7 = Program.IsX7(dev);
+                if (!x7 && !Program.IsAtk(dev)) continue;
                 found++;
-                Console.WriteLine("ATK collection: " + dev.Product + " " + dev.Path);
+                Console.WriteLine("Battery collection: " + dev.Product + " " + dev.Path);
                 IntPtr handle = Native.CreateFileW(dev.Path, Native.GENERIC_READ | Native.GENERIC_WRITE,
                     Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING,
                     Native.FILE_FLAG_OVERLAPPED, IntPtr.Zero);
@@ -361,15 +433,16 @@ namespace InphicBatteryTray
                     for (int i = 0; i < 3; i++)
                     {
                         int charge;
-                        int level = Program.QueryAtkBattery(handle, dev, out charge);
-                        Check(level >= 0, "No valid ATK battery reply; wake the mouse and close exclusive vendor tools");
-                        Console.WriteLine("ATK battery: " + level + "% charge=" + charge);
+                        int level = x7 ? Program.QueryX7Battery(handle, dev, out charge)
+                            : Program.QueryAtkBattery(handle, dev, out charge);
+                        Check(level >= 0, "No valid battery reply; wake the mouse and close exclusive vendor tools");
+                        Console.WriteLine(dev.Product + " battery: " + level + "% charge=" + charge);
                         if (i < 2) System.Threading.Thread.Sleep(2500);
                     }
                 }
                 finally { Native.CloseHandle(handle); }
             }
-            Check(found > 0, "No matching ATK 1K battery collection connected");
+            Check(found > 0, "No supported battery collection connected");
             Console.WriteLine("PASS: hardware query");
         }
     }
